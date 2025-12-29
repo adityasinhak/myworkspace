@@ -1,0 +1,79 @@
+-- Copyright (c) 2019 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Test where
+
+import DA.Action
+import DA.Date
+import DA.Time
+import DA.List
+import Daml.Script
+import CrowdFunding
+import Iou
+
+data Fixture = Fixture with
+  o : Party
+  a : Party
+  b : Party
+  c : Party
+  projectId : ContractId Campaign
+
+setupFixture : Decimal -> Decimal -> Decimal -> Decimal -> Script Fixture
+setupFixture amountA amountB amountC threshold =
+  do
+    i <- allocateParty "Issuer"
+    o <- allocateParty "Originator"
+    a <- allocateParty "A"
+    b <- allocateParty "B"
+    c <- allocateParty "C"
+    
+    submit i do createCmd Iou with issuer = i; owner = a; locker = a; amount = amountA; currency = "USD"
+    submit i do createCmd Iou with issuer = i; owner = b; locker = b; amount = amountB; currency = "USD"
+    submit i do createCmd Iou with issuer = i; owner = c; locker = c; amount = amountC; currency = "USD"
+
+    projectId <- submit o do
+      createCmd Campaign with
+        originator = o
+        name = "MyProject"
+        description = "A test project"
+        backers = []
+        ious = []
+        raised = 0.0
+        deadline = time (date 1970 Jan 2) 0 0 0
+        threshold
+
+    let backers = [a,b,c]
+
+    -- | exercise Invite then Accept for each of the backers 
+    projectId <- foldlA (\projectId backer -> do 
+      inviteId <- submit o do exerciseCmd projectId Invite with ..
+      submit backer do exerciseCmd inviteId Accept
+      ) projectId backers
+    
+    -- | exercise Pledge for each of the backers respective Ious
+    projectId <- foldlA (\projectId backer -> do
+      iouId <- fst . head <$> queryFilter @Iou backer (\Iou{..} -> owner == backer)
+      submit backer do exerciseCmd projectId Pledge with ..
+      ) projectId backers
+
+    pure Fixture with ..
+
+validClaim = script do
+  Fixture{..} <- setupFixture 50.0 25.0 25.0 100.0
+  setTime (time (date 1970 Jan 2) 0 0 0)
+  submit o do exerciseCmd projectId Claim
+
+validReclaim = script do
+  Fixture{..} <- setupFixture 49.0 25.0 25.0 100.0
+  setTime (time (date 1970 Jan 2) 0 0 0)
+  submit a do exerciseCmd projectId Reclaim with backer = a
+
+invalidClaim = script do
+  Fixture{..} <- setupFixture 49.0 25.0 25.0 100.0
+  setTime (time (date 1970 Jan 2) 0 0 0)
+  submitMustFail o do exerciseCmd projectId Claim
+
+invalidReclaim = script do
+  Fixture{..} <- setupFixture 50.0 25.0 25.0 100.0
+  setTime (time (date 1970 Jan 2) 0 0 0)
+  submitMustFail a do exerciseCmd projectId Reclaim with backer = a
